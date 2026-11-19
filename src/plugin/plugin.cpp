@@ -158,7 +158,7 @@ private:
         if (wrapper && wrapper->get_wrapper_flavor)
         {
             const char* flavor = wrapper->get_wrapper_flavor(m_host);
-            m_plainChoices = flavor && (!std::strcmp(flavor, CLAP_WRAPPER_HOST_FLAVOR_AUV2) ||
+            m_audioUnit = flavor && (!std::strcmp(flavor, CLAP_WRAPPER_HOST_FLAVOR_AUV2) ||
                                         !std::strcmp(flavor, CLAP_WRAPPER_HOST_FLAVOR_AUV3));
         }
         return true;
@@ -300,7 +300,12 @@ private:
             const int was = ToInt(m_values[idx].exchange(v));
             const int now = ToInt(v);
             m_dirty = true;
-            if (now != was) LoadPreset(idx, now, out, ev->header.time);
+            // Not in an Audio Unit. An AU's parameters must each keep what they
+            // were set to, and the wrapper hands a batch of them over in an
+            // order of its own - auval sets them all and then finds the room
+            // has overwritten the rest, and Logic will not load an AU that
+            // fails auval. There the choice is the room's character alone.
+            if (now != was && !m_audioUnit) LoadPreset(idx, now, out, ev->header.time);
             return;
         }
 
@@ -594,7 +599,7 @@ private:
         switch (d.unit)
         {
         case Unit::Choice:
-            if (!m_plainChoices) f |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
+            if (!m_audioUnit) f |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
             break;
         case Unit::Toggle:
         case Unit::Trigger: f |= CLAP_PARAM_IS_STEPPED; break;
@@ -669,7 +674,7 @@ private:
     bool m_activating = false;
     std::atomic<bool> m_rescanPending{ false };
     std::vector<double> m_presetScratch;
-    bool m_plainChoices = false;       // see Init
+    bool m_audioUnit = false;          // wrapped as an Audio Unit; see Init
 
     const size_t m_count;
     std::unique_ptr<std::atomic<double>[]> m_values;   // read anywhere

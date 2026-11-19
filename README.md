@@ -53,6 +53,12 @@ that room's values, as it does in FastPlay, and the host is told, so its
 controls follow. Change any of them afterwards and the change stays. Choosing
 the same room again does not reset them.
 
+Audio Units are the exception. An Audio Unit's parameters must each keep the
+value they were set to, and Logic will not load one that breaks that rule. So
+in the AU, choosing a room changes only what the room adds beyond the visible
+controls (its level and, for the Advanced Reverb, the EFX settings that have
+no control of their own). Size, Decay and the rest stay where they are.
+
 ### What every plugin has
 
 Every plugin also has **Bypass**, which hosts treat as their own bypass
