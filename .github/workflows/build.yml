@@ -133,10 +133,14 @@ jobs:
           # The registrar caches what it saw before the copy.
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           auval -a | grep FPlg
+          # Every unit is validated even after one fails, so a run reports
+          # all of them rather than the first.
+          failed=""
           for st in Spdn RNns Tone Eq10 PEq4 ChMx Comp Limt Gate Norm Ptch Clip Bufr; do
             echo "=== $st"
-            auval -v aufx "$st" FPlg
+            auval -v aufx "$st" FPlg || failed="$failed $st"
           done
+          if [ -n "$failed" ]; then echo "auval failed:$failed"; exit 1; fi
 
       # Zipped here rather than by upload-artifact, which drops Unix
       # permissions - and a Mac bundle without its executable bit is a bundle

@@ -29,6 +29,8 @@
 #include "denormals.h"
 #include "util.h"
 
+#include <clapwrapper/wrapper_host.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -144,6 +146,20 @@ private:
         m_hostParams  = static_cast<const clap_host_params_t*>(m_host->get_extension(m_host, CLAP_EXT_PARAMS));
         m_hostLatency = static_cast<const clap_host_latency_t*>(m_host->get_extension(m_host, CLAP_EXT_LATENCY));
         m_hostLog     = static_cast<const clap_host_log_t*>(m_host->get_extension(m_host, CLAP_EXT_LOG));
+
+        // clap-wrapper's Audio Units turn a stepped parameter of more than two
+        // values into an Indexed one, and an Indexed parameter has to hand
+        // auval and the host a list of its names - which the wrapper does not
+        // provide, so auval fails it outright. Under an Audio Unit a choice is
+        // therefore an ordinary parameter whose values still read as names.
+        const auto* wrapper = static_cast<const clap_wrapper_host_information_t*>(
+            m_host->get_extension(m_host, CLAP_WRAPPER_HOST_INFORMATION));
+        if (wrapper && wrapper->get_wrapper_flavor)
+        {
+            const char* flavor = wrapper->get_wrapper_flavor(m_host);
+            m_plainChoices = flavor && (!std::strcmp(flavor, CLAP_WRAPPER_HOST_FLAVOR_AUV2) ||
+                                        !std::strcmp(flavor, CLAP_WRAPPER_HOST_FLAVOR_AUV3));
+        }
         return true;
     }
 
@@ -511,7 +527,9 @@ private:
         if (d.automatable) f |= CLAP_PARAM_IS_AUTOMATABLE;
         switch (d.unit)
         {
-        case Unit::Choice:  f |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM; break;
+        case Unit::Choice:
+            if (!m_plainChoices) f |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM;
+            break;
         case Unit::Toggle:
         case Unit::Trigger: f |= CLAP_PARAM_IS_STEPPED; break;
         case Unit::Bypass:  f |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_BYPASS; break;
@@ -575,6 +593,7 @@ private:
     const clap_host_params_t*  m_hostParams = nullptr;
     const clap_host_latency_t* m_hostLatency = nullptr;
     const clap_host_log_t*     m_hostLog = nullptr;
+    bool m_plainChoices = false;       // see Init
 
     const size_t m_count;
     std::unique_ptr<std::atomic<double>[]> m_values;   // read anywhere
