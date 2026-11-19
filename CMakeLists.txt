@@ -11,6 +11,13 @@ endif()
 
 project(FastPlugs VERSION 0.1.0 LANGUAGES C CXX)
 
+# The Audio Unit wrapper is Objective-C++. clap-wrapper enables that language
+# in its own project, but make_clapfirst_plugins creates the AU target in this
+# directory, and a language enabled in a subproject is not set up here.
+if (APPLE)
+    enable_language(OBJC OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
