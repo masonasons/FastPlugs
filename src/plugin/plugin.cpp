@@ -109,6 +109,7 @@ public:
           m_snap(def.params.size(), 0.0)
     {
         for (size_t i = 0; i < m_count; ++i) m_values[i].store(def.params[i].def);
+        m_presetScratch.assign(m_count, 0.0);
         m_mixIndex = ParamIndex(def, kMixId);
         m_bypassIndex = ParamIndex(def, kBypassId);
 
@@ -130,7 +131,7 @@ public:
             { return Self(p)->Process(pr); };
         m_clap.get_extension = [](const clap_plugin_t* p, const char* id)
             { return Self(p)->Extension(id); };
-        m_clap.on_main_thread = [](const clap_plugin_t*) {};
+        m_clap.on_main_thread = [](const clap_plugin_t* p) { Self(p)->OnMainThread(); };
     }
 
     const clap_plugin_t* Clap() const { return &m_clap; }
@@ -145,6 +146,7 @@ private:
         m_hostParams  = static_cast<const clap_host_params_t*>(m_host->get_extension(m_host, CLAP_EXT_PARAMS));
         m_hostLatency = static_cast<const clap_host_latency_t*>(m_host->get_extension(m_host, CLAP_EXT_LATENCY));
         m_hostLog     = static_cast<const clap_host_log_t*>(m_host->get_extension(m_host, CLAP_EXT_LOG));
+        m_hostTail    = static_cast<const clap_host_tail_t*>(m_host->get_extension(m_host, CLAP_EXT_TAIL));
 
         // clap-wrapper's Audio Units turn a stepped parameter of more than two
         // values into an Indexed one, and an Indexed parameter is expected to
@@ -204,8 +206,10 @@ private:
         // Configured with any restart request held back: whatever latency this
         // asks for is the latency being activated, not a change to one.
         m_restartAsked = true;
+        m_activating = true;
         m_dirty = false;
         ConfigureNow();
+        m_activating = false;
         m_restartAsked = false;
 
         const uint32_t need = (uint32_t)std::max(0, m_fx->LatencyFrames());
@@ -241,9 +245,27 @@ private:
     void ConfigureNow()
     {
         for (size_t i = 0; i < m_count; ++i) m_snap[i] = m_values[i].load();
-        m_def.toBlock(m_snap.data(), m_block);
-        m_fx->Configure(m_block);
+        if (m_def.toBlock)
+        {
+            m_def.toBlock(m_snap.data(), m_block);
+            m_fx->Configure(m_block);
+        }
+        else if (m_def.apply)
+        {
+            m_def.apply(*m_fx, m_snap.data());
+        }
         UpdateMixTarget();
+
+        // A reverb's tail follows its size, an echo's its feedback. The host
+        // is told when that changes, so it does not cut one off.
+        // Only from the audio thread, which is the one CLAP allows; during
+        // activation, on the main thread, the host reads the tail afresh.
+        const uint32_t tail = TailFrames();
+        if (tail != m_lastTail)
+        {
+            m_lastTail = tail;
+            if (!m_activating && m_hostTail && m_hostTail->changed) m_hostTail->changed(m_host);
+        }
 
         const uint32_t need = (uint32_t)std::max(0, m_fx->LatencyFrames());
         if (need > m_latency)
@@ -263,12 +285,24 @@ private:
         }
     }
 
-    void ApplyParam(const clap_event_param_value_t* ev)
+    void ApplyParam(const clap_event_param_value_t* ev, const clap_output_events_t* out)
     {
         const int idx = ParamIndex(m_def, ev->param_id);
         if (idx < 0) return;
         const ParamDef& d = m_def.params[(size_t)idx];
         const double v = std::max(d.min, std::min(d.max, ev->value));
+
+        if (d.preset && m_def.presetValues)
+        {
+            // Only a different choice loads a preset. Hosts send a parameter's
+            // current value back now and then - after restoring a session, say -
+            // and that must not undo the settings the session restored.
+            const int was = ToInt(m_values[idx].exchange(v));
+            const int now = ToInt(v);
+            m_dirty = true;
+            if (now != was) LoadPreset(idx, now, out, ev->header.time);
+            return;
+        }
 
         if (d.unit == Unit::Trigger)
         {
@@ -287,14 +321,72 @@ private:
         m_dirty = true;
     }
 
-    void Flush(const clap_input_events_t* in)
+    // A preset choice has moved: the parameters it sets are set, and the host is
+    // told, both in the event stream - which is how a host's own controls
+    // follow - and by a rescan on the main thread, for a host that ignores
+    // values coming back from a plugin.
+    void LoadPreset(int idx, int choice, const clap_output_events_t* out, uint32_t time)
+    {
+        for (size_t i = 0; i < m_count; ++i) m_presetScratch[i] = m_values[i].load();
+        m_def.presetValues(idx, choice, m_presetScratch.data());
+        bool changed = false;
+        for (size_t i = 0; i < m_count; ++i)
+        {
+            if ((int)i == idx) continue;
+            const ParamDef& d = m_def.params[i];
+            const double v = std::max(d.min, std::min(d.max, m_presetScratch[i]));
+            if (v == m_values[i].load()) continue;
+            m_values[i].store(v);
+            if (out) PushValue(out, time, d.id, v);
+            changed = true;
+        }
+        if (changed)
+        {
+            m_rescanPending = true;
+            m_host->request_callback(m_host);
+        }
+    }
+
+    static void PushValue(const clap_output_events_t* out, uint32_t time, clap_id id, double v)
+    {
+        clap_event_param_value_t e{};
+        e.header.size = sizeof(e);
+        e.header.time = time;
+        e.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        e.header.type = CLAP_EVENT_PARAM_VALUE;
+        e.header.flags = 0;
+        e.param_id = id;
+        e.cookie = nullptr;
+        e.note_id = -1;
+        e.port_index = -1;
+        e.channel = -1;
+        e.key = -1;
+        e.value = v;
+        out->try_push(out, &e.header);
+    }
+
+    void OnMainThread()
+    {
+        if (m_rescanPending.exchange(false) && m_hostParams)
+            m_hostParams->rescan(m_host, CLAP_PARAM_RESCAN_VALUES);
+    }
+
+    uint32_t TailFrames() const
+    {
+        if (!m_def.tailFrames || m_count > kMaxParams) return 0;
+        double v[kMaxParams];
+        for (size_t i = 0; i < m_count; ++i) v[i] = m_values[i].load();
+        return m_def.tailFrames(v, m_rate);
+    }
+
+    void Flush(const clap_input_events_t* in, const clap_output_events_t* out)
     {
         const uint32_t n = in ? in->size(in) : 0;
         for (uint32_t i = 0; i < n; ++i)
         {
             const clap_event_header_t* h = in->get(in, i);
             if (h->space_id == CLAP_CORE_EVENT_SPACE_ID && h->type == CLAP_EVENT_PARAM_VALUE)
-                ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h));
+                ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h), out);
         }
         if (m_fx && m_dirty.exchange(false)) ConfigureNow();
     }
@@ -317,7 +409,7 @@ private:
                 continue;
             const uint32_t t = std::min(h->time, frames);
             if (t > pos) { Render(p, pos, t); pos = t; }
-            ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h));
+            ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h), p->out_events);
         }
         if (pos < frames) Render(p, pos, frames);
         return CLAP_PROCESS_CONTINUE;
@@ -484,6 +576,7 @@ private:
         if (!std::strcmp(id, CLAP_EXT_STATE)) return &s_state;
         if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &s_latency;
         if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &s_ports;
+        if (!std::strcmp(id, CLAP_EXT_TAIL) && m_def.tailFrames) return &s_tail;
         if (!std::strcmp(id, CLAP_EXT_CONFIGURABLE_AUDIO_PORTS) ||
             !std::strcmp(id, CLAP_EXT_CONFIGURABLE_AUDIO_PORTS_COMPAT))
             return &s_configurable;
@@ -557,6 +650,11 @@ private:
     static const clap_plugin_latency_t s_latency;
     static const clap_plugin_audio_ports_t s_ports;
     static const clap_plugin_configurable_audio_ports_t s_configurable;
+    static const clap_plugin_tail_t s_tail;
+
+    // More than any effect here has, so a tail can be worked out on the
+    // audio thread without allocating.
+    static constexpr size_t kMaxParams = 64;
 
     // --- members -------------------------------------------------------------------
 
@@ -566,6 +664,11 @@ private:
     const clap_host_params_t*  m_hostParams = nullptr;
     const clap_host_latency_t* m_hostLatency = nullptr;
     const clap_host_log_t*     m_hostLog = nullptr;
+    const clap_host_tail_t*    m_hostTail = nullptr;
+    uint32_t m_lastTail = 0;
+    bool m_activating = false;
+    std::atomic<bool> m_rescanPending{ false };
+    std::vector<double> m_presetScratch;
     bool m_plainChoices = false;       // see Init
 
     const size_t m_count;
@@ -614,8 +717,8 @@ const clap_plugin_params_t Plugin::s_params = {
         if (idx < 0 || !text) return false;
         return TextValue(Self(p)->m_def.params[(size_t)idx], text, v);
     },
-    [](const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*)
-        { Self(p)->Flush(in); },
+    [](const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t* out)
+        { Self(p)->Flush(in, out); },
 };
 
 const clap_plugin_state_t Plugin::s_state = {
@@ -625,6 +728,10 @@ const clap_plugin_state_t Plugin::s_state = {
 
 const clap_plugin_latency_t Plugin::s_latency = {
     [](const clap_plugin_t* p) { return Self(p)->m_latency; },
+};
+
+const clap_plugin_tail_t Plugin::s_tail = {
+    [](const clap_plugin_t* p) { return Self(p)->TailFrames(); },
 };
 
 const clap_plugin_audio_ports_t Plugin::s_ports = {

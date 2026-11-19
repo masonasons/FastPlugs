@@ -29,23 +29,13 @@ int    ValueToHz(double v)  { return (int)std::lround(std::exp2(v)); }
 ParamDef P(clap_id id, const char* name, const char* module,
            double min, double max, double def, Unit unit)
 {
-    ParamDef p;
-    p.id = id;
-    p.name = name;
-    p.module = module;
-    p.min = min;
-    p.max = max;
-    p.def = def < min ? min : (def > max ? max : def);
-    p.unit = unit;
-    return p;
+    return MakeParam(id, name, module, min, max, def, unit);
 }
 
 ParamDef Choice(clap_id id, const char* name, const char* module,
                 std::vector<std::string> choices, int def)
 {
-    ParamDef p = P(id, name, module, 0, (double)choices.size() - 1, def, Unit::Choice);
-    p.choices = std::move(choices);
-    return p;
+    return MakeChoice(id, name, module, std::move(choices), def);
 }
 
 ParamDef Toggle(clap_id id, const char* name, const char* module, bool def)
@@ -93,18 +83,7 @@ std::vector<EffectDef> Build()
                       std::vector<const char*> features, const char* subtype,
                       std::unique_ptr<Effect> (*make)()) -> EffectDef&
     {
-        EffectDef e;
-        e.key = key;
-        e.name = name;
-        e.description = desc;
-        e.features = std::move(features);
-        e.features.push_back(CLAP_PLUGIN_FEATURE_STEREO);
-        e.features.push_back(CLAP_PLUGIN_FEATURE_MONO);
-        e.features.push_back(nullptr);
-        std::memcpy(e.auSubtype, subtype, 4);
-        e.make = make;
-        all.push_back(std::move(e));
-        return all.back();
+        return AddEffect(all, key, name, desc, std::move(features), subtype, make);
     };
 
     // --- Denoisers -------------------------------------------------------
@@ -368,6 +347,8 @@ std::vector<EffectDef> Build()
         };
     }
 
+    AddFastPlayEffects(all);
+
     // --- What every one of them has -------------------------------------------
     for (EffectDef& e : all)
     {
@@ -432,6 +413,46 @@ std::string FmtI(const char* fmt, int a)
 
 }  // namespace
 
+ParamDef MakeParam(clap_id id, const char* name, const char* module,
+                   double min, double max, double def, Unit unit)
+{
+    ParamDef p;
+    p.id = id;
+    p.name = name;
+    p.module = module;
+    p.min = min;
+    p.max = max;
+    p.def = def < min ? min : (def > max ? max : def);
+    p.unit = unit;
+    return p;
+}
+
+ParamDef MakeChoice(clap_id id, const char* name, const char* module,
+                    std::vector<std::string> choices, int def)
+{
+    ParamDef p = MakeParam(id, name, module, 0, (double)choices.size() - 1, def, Unit::Choice);
+    p.choices = std::move(choices);
+    return p;
+}
+
+EffectDef& AddEffect(std::vector<EffectDef>& all, const char* key, const char* name,
+                     const char* desc, std::vector<const char*> features,
+                     const char* subtype, std::unique_ptr<Effect> (*make)())
+{
+    EffectDef e;
+    e.key = key;
+    e.name = name;
+    e.description = desc;
+    e.features = std::move(features);
+    e.features.push_back(CLAP_PLUGIN_FEATURE_STEREO);
+    e.features.push_back(CLAP_PLUGIN_FEATURE_MONO);
+    e.features.push_back(nullptr);
+    std::memcpy(e.auSubtype, subtype, 4);
+    e.make = make;
+    all.push_back(std::move(e));
+    return all.back();
+}
+
 const std::vector<EffectDef>& Effects()
 {
     static const std::vector<EffectDef> all = Build();
@@ -482,6 +503,26 @@ std::string ValueText(const ParamDef& p, double v)
     case Unit::Toggle:
     case Unit::Trigger:   return v >= 0.5 ? "On" : "Off";
     case Unit::Bypass:    return v >= 0.5 ? "Bypassed" : "Active";
+    case Unit::HzOff:
+    case Unit::HighCut:
+    case Unit::HzPlain:
+    {
+        if (p.unit == Unit::HzOff && i <= (int)p.min) return "Off";
+        if (p.unit == Unit::HighCut && i >= (int)p.max) return "Off";
+        return i < 1000 ? FmtI("%d Hz", i) : Fmt("%.1f kHz", i / 1000.0);
+    }
+    case Unit::SecondsF:  return Fmt("%.2f s", v);
+    case Unit::Multiplier:return Fmt("%.2fx", v);
+    case Unit::Degrees:   return i == 1 || i == -1 ? FmtI("%d degree", i) : FmtI("%d degrees", i);
+    case Unit::Metres10:
+    {
+        const double m = std::round(v) / 10.0;
+        return m == 0.0 ? "0.0 m" : Fmt("%+.1f m", m);
+    }
+    case Unit::CentreAmount:
+        if (i == 0) return "Off";
+        // FastPlay's spelling, as the plugin's own name has it.
+        return i > 0 ? FmtI("Remove center %d%%", i) : FmtI("Extract center %d%%", -i);
     }
     return std::string();
 }
@@ -495,6 +536,10 @@ bool TextValue(const ParamDef& p, const char* text, double* out)
     switch (p.unit)
     {
     case Unit::Choice:
+        // The whole name first, so a name that begins another earlier in the
+        // list ("Hall" after "Hallway") still reads back as itself.
+        for (size_t c = 0; c < p.choices.size() && !ok; ++c)
+            if (Lower(p.choices[c].c_str()) == s) { v = (double)c; ok = true; }
         for (size_t c = 0; c < p.choices.size() && !ok; ++c)
         {
             const std::string name = Lower(p.choices[c].c_str());
@@ -549,6 +594,32 @@ bool TextValue(const ParamDef& p, const char* text, double* out)
         }
         break;
     }
+
+    case Unit::HzOff:
+    case Unit::HighCut:
+    case Unit::HzPlain:
+        if (s.find("off") != std::string::npos)
+        {
+            v = (p.unit == Unit::HighCut) ? p.max : p.min;
+            ok = (p.unit != Unit::HzPlain);
+            break;
+        }
+        ok = FirstNumber(s, &v);
+        if (ok && s.find('k') != std::string::npos) v *= 1000.0;
+        break;
+
+    case Unit::Metres10:
+        ok = FirstNumber(s, &v);
+        v *= 10.0;
+        break;
+
+    case Unit::CentreAmount:
+        if (s.find("off") != std::string::npos) { v = 0; ok = true; break; }
+        ok = FirstNumber(s, &v);
+        if (ok && s.find("extract") != std::string::npos) v = -std::fabs(v);
+        else if (ok && (s.find("remove") != std::string::npos ||
+                        s.find("cancel") != std::string::npos)) v = std::fabs(v);
+        break;
 
     default:
         ok = FirstNumber(s, &v);

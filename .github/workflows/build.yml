@@ -110,8 +110,9 @@ jobs:
           # The sweep goes down to 1 kHz and through fractional rates. Speex
           # Denoise refuses the rates its FFT cannot factor rather than let
           # SpeexDSP call exit() inside the host, and the validator counts a
-          # refusal as a failure - so the sweep runs for the other twelve.
-          for id in rnnoise tone eq10 para-eq channels compressor limiter gate normaliser pitch clip-monitor buffer; do
+          # refusal as a failure - so the sweep runs for every other plugin.
+          for id in rnnoise tone eq10 para-eq channels compressor limiter gate normaliser pitch clip-monitor buffer \
+                    echo reverb advanced-reverb center-cancel 3d-audio; do
             "$V" validate --only-failed --hide-output -t process-varying-sample-rates \
               -p "io.github.masonasons.fastplugs.$id" "$CLAP"
           done
@@ -136,7 +137,8 @@ jobs:
           # Every unit is validated even after one fails, so a run reports
           # all of them rather than the first.
           failed=""
-          for st in Spdn RNns Tone Eq10 PEq4 ChMx Comp Limt Gate Norm Ptch Clip Bufr; do
+          for st in Spdn RNns Tone Eq10 PEq4 ChMx Comp Limt Gate Norm Ptch Clip Bufr \
+                    Echo Rvrb ARvb CCnc 3DAu; do
             echo "=== $st"
             auval -v aufx "$st" FPlg || failed="$failed $st"
           done

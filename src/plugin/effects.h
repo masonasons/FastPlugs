@@ -38,6 +38,15 @@ enum class Unit
     Toggle,
     Trigger,     // a button: any change presses it
     Bypass,
+    // FastPlay's, whose settings are not all whole numbers
+    HzOff,       // a frequency in Hz whose lowest setting is off
+    HighCut,     // a frequency in Hz whose highest setting is off
+    HzPlain,     // a frequency in Hz, on a straight line
+    SecondsF,    // "1.49 s"
+    Multiplier,  // "0.83x"
+    Degrees,
+    Metres10,    // tenths of a metre, read as metres
+    CentreAmount,// -100 extracts the centre, +100 removes it
 };
 
 struct ParamDef
@@ -52,6 +61,9 @@ struct ParamDef
     // moves. Automating those would restart the plugin on every step.
     bool automatable = true;
     int action = -1;             // the BlockActionId a Trigger presses
+    // A choice of preset: picking a different one sets other parameters, as
+    // FastPlay's reverb rooms do. See EffectDef::presetValues.
+    bool preset = false;
 };
 
 struct EffectDef
@@ -63,8 +75,16 @@ struct EffectDef
     char auSubtype[5] = { 0 };
     std::unique_ptr<Effect> (*make)() = nullptr;
     std::vector<ParamDef> params;
-    // Writes the parameters into `b`. `v` is indexed like `params`.
+    // FastRoute's effects: writes the parameters into `b`, which is handed to
+    // the effect's Configure. `v` is indexed like `params`.
     void (*toBlock)(const double* v, Block& b) = nullptr;
+    // Everything else: the parameters go to the effect directly.
+    void (*apply)(Effect& fx, const double* v) = nullptr;
+    // A preset parameter at `index` has moved to `choice`: write what that
+    // preset sets into `v` (indexed like `params`, holding the current values).
+    void (*presetValues)(int index, int choice, double* v) = nullptr;
+    // How long the effect goes on sounding after its input stops, in frames.
+    uint32_t (*tailFrames)(const double* v, int rate) = nullptr;
     bool hasMix = true;
     bool isBuffer = false;
     // Why the effect cannot run at this rate, or empty when it can. Checked
@@ -82,6 +102,18 @@ constexpr clap_id kMixId    = 900;
 constexpr clap_id kBypassId = 901;
 
 const std::vector<EffectDef>& Effects();
+
+// FastPlay's effects, added to the list (fastplay_fx.cpp).
+void AddFastPlayEffects(std::vector<EffectDef>& all);
+
+// The same constructor helpers effects.cpp uses, for fastplay_fx.cpp.
+ParamDef MakeParam(clap_id id, const char* name, const char* module,
+                   double min, double max, double def, Unit unit);
+ParamDef MakeChoice(clap_id id, const char* name, const char* module,
+                    std::vector<std::string> choices, int def);
+EffectDef& AddEffect(std::vector<EffectDef>& all, const char* key, const char* name,
+                     const char* desc, std::vector<const char*> features,
+                     const char* subtype, std::unique_ptr<Effect> (*make)());
 
 // Index of `id` in `def.params`, or -1.
 int ParamIndex(const EffectDef& def, clap_id id);

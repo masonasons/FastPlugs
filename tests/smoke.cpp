@@ -264,6 +264,29 @@ std::vector<clap_param_info_t> Params(Instance& in)
 }
 
 
+// How late the left channel comes out, found by cross-correlating noise. For a
+// spectral effect, which smears an impulse across its window until no one
+// sample of it stands out.
+int NoiseDelay(Instance& in, double rate, int maxLag)
+{
+    const uint32_t block = 256;
+    const uint32_t total = (uint32_t)(rate * 0.5) + (uint32_t)maxLag;
+    std::vector<float> iL(total), iR(total, 0.0f), oL(total, 0.0f), oR(total, 0.0f);
+    for (uint32_t i = 0; i < total; ++i) iL[i] = (float)(Rand01() - 0.5);
+    for (uint32_t o = 0; o < total; o += block)
+        in.Run(iL, iR, oL, oR, o, std::min(block, total - o));
+    int best = -1;
+    double bestC = 0;
+    const uint32_t n = total - (uint32_t)maxLag;
+    for (int lag = 0; lag <= maxLag; ++lag)
+    {
+        double c = 0;
+        for (uint32_t i = 0; i < n; ++i) c += (double)iL[i] * oL[i + (uint32_t)lag];
+        if (c > bestC) { bestC = c; best = lag; }
+    }
+    return best;
+}
+
 // --- the checks -------------------------------------------------------------------
 
 void CheckText(Instance& in)
@@ -308,19 +331,28 @@ void CheckText(Instance& in)
 
 // Where an impulse comes out, with the effect bypassed so only its delay is
 // being measured.
-int ImpulseDelay(Instance& in, double rate)
+int ImpulseDelay(Instance& in, double rate, bool leftOnly = false, int* firstSound = nullptr)
 {
     const uint32_t block = 256;
     const uint32_t total = (uint32_t)(rate * 0.6);
     const uint32_t at = 1000;
     std::vector<float> iL(total, 0.0f), iR(total, 0.0f), oL(total, 0.0f), oR(total, 0.0f);
-    iL[at] = iR[at] = 0.5f;
+    iL[at] = 0.5f;
+    if (!leftOnly) iR[at] = 0.5f;
     for (uint32_t o = 0; o < total; o += block)
         in.Run(iL, iR, oL, oR, o, std::min(block, total - o));
     uint32_t best = 0;
     float peak = 0.0f;
     for (uint32_t i = 0; i < total; ++i)
         if (std::fabs(oL[i]) > peak) { peak = std::fabs(oL[i]); best = i; }
+    if (firstSound)
+    {
+        // The first sample anything at all comes out, either side.
+        *firstSound = -1;
+        for (uint32_t i = 0; i < total; ++i)
+            if (std::fabs(oL[i]) > 1e-6f || std::fabs(oR[i]) > 1e-6f)
+            { *firstSound = (int)i - (int)at; break; }
+    }
     if (peak < 0.05f) return -1;
     return (int)best - (int)at;
 }
@@ -521,6 +553,89 @@ int main()
               "limiter lookahead 20 then 2 ms: reports %d, measures %d", reported, measured);
     }
     if (g_failures == before) std::printf("  ok\n");
+
+    // FastPlay's own behaviour, which the generic checks above do not reach.
+    std::printf("FastPlay effects\n");
+    const int beforeFp = g_failures;
+    {
+        // A room sets the reverb's other controls, as FastPlay's Room does.
+        Instance in(f, (base + "reverb").c_str());
+        in.Set(0, 11.0);                                  // Cave
+        CHECK(std::fabs(in.Get(2) - 82.0) < 1e-3 && std::fabs(in.Get(3) - 15.0) < 1e-3 &&
+              std::fabs(in.Get(5) - 15.0) < 1e-3,
+              "reverb Cave: size %g, damping %g, pre-delay %g", in.Get(2), in.Get(3), in.Get(5));
+        // The same room sent again - a host echoing values back after
+        // restoring a session - leaves an edited control alone.
+        in.Set(2, 40.0);
+        in.Set(0, 11.0);
+        CHECK(std::fabs(in.Get(2) - 40.0) < 1e-3, "reverb: resending the room reset size to %g", in.Get(2));
+        // And during processing the host is told what moved.
+        in.Activate(48000.0, 512);
+        InEvents ev;
+        ev.Add(10, 0, 3.0);                               // Large room
+        std::vector<float> iL(512, 0.0f), iR(512, 0.0f), oL(512), oR(512);
+        float* ip[2] = { iL.data(), iR.data() };
+        float* op[2] = { oL.data(), oR.data() };
+        clap_audio_buffer_t ib{}; ib.data32 = ip; ib.channel_count = 2;
+        clap_audio_buffer_t ob{}; ob.data32 = op; ob.channel_count = 2;
+        OutEvents out;
+        clap_process_t pr{};
+        pr.steady_time = -1; pr.frames_count = 512;
+        pr.audio_inputs = &ib; pr.audio_inputs_count = 1;
+        pr.audio_outputs = &ob; pr.audio_outputs_count = 1;
+        pr.in_events = &ev.list; pr.out_events = &out.list;
+        in.p->process(in.p, &pr);
+        CHECK(out.pushed >= 3, "reverb: a room change told the host about %d parameters", out.pushed);
+        const auto* tail = (const clap_plugin_tail_t*)in.p->get_extension(in.p, CLAP_EXT_TAIL);
+        CHECK(tail && tail->get(in.p) > 48000u / 2, "reverb: tail of %u frames",
+              tail ? tail->get(in.p) : 0u);
+    }
+    {
+        Instance in(f, (base + "advanced-reverb").c_str());
+        in.Set(0, 9.0);                                   // Arena
+        CHECK(std::fabs(in.Get(2) - 7.24) < 1e-3, "advanced reverb Arena: decay %g", in.Get(2));
+    }
+    {
+        Instance in(f, (base + "echo").c_str());
+        in.Set(1, 50.0);
+        in.Activate(48000.0, 512);
+        const auto* tail = (const clap_plugin_tail_t*)in.p->get_extension(in.p, CLAP_EXT_TAIL);
+        // 300 ms at 50% feedback: ten repeats to fall 60 dB, about 3.3 s.
+        CHECK(tail && tail->get(in.p) > 48000u * 3 && tail->get(in.p) < 48000u * 4,
+              "echo: tail of %u frames", tail ? tail->get(in.p) : 0u);
+    }
+    // The wet signal lines up with the reported latency, not only the dry.
+    // Centre cancel's spectral path is checked with an impulse on one side,
+    // which is not centre and so comes through.
+    for (double amount : { 100.0, -100.0, 0.0 })
+    {
+        Instance in(f, (base + "center-cancel").c_str());
+        in.Set(0, amount);
+        in.Activate(48000.0, 512);
+        const int reported = (int)in.latency->get(in.p);
+        const int measured = NoiseDelay(in, 48000.0, 4400);
+        CHECK(reported == 4095 && std::abs(measured - reported) <= 2,
+              "center cancel at %g: reports %d, measures %d", amount, reported, measured);
+    }
+    for (double mode : { 0.0, 1.0, 2.0 })
+    {
+        Instance in(f, (base + "3d-audio").c_str());
+        in.Set(0, mode);
+        in.Activate(48000.0, 512);
+        // And a mode changed while running, which is what used to drop the
+        // latency to nothing.
+        in.Set(0, mode == 0.0 ? 1.0 : 0.0);
+        in.Set(0, mode);
+        const int reported = (int)in.latency->get(in.p);
+        int first = -1;
+        const int measured = ImpulseDelay(in, 48000.0, false, &first);
+        // An HRTF delays each ear by the sound's path to it, and a room by the
+        // distance to the speakers; nothing may come out before the latency.
+        CHECK(reported == 128 && first >= reported,
+              "3D audio mode %g: reports %d, first sound at %d, loudest at %d",
+              mode, reported, first, measured);
+    }
+    if (g_failures == beforeFp) std::printf("  ok\n");
 
     // The buffer's Save writes a real file into Documents/FastPlugs, so it is
     // only exercised when asked for: FASTPLUGS_TEST_SAVE=1.

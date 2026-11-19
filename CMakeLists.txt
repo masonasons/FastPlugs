@@ -86,10 +86,11 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(fastplugs_impl STATIC
     src/plugin/effects.cpp
+    src/plugin/fastplay_fx.cpp
     src/plugin/plugin.cpp
     src/plugin/factory.cpp)
 target_include_directories(fastplugs_impl PUBLIC src/plugin)
-target_link_libraries(fastplugs_impl PUBLIC fastroute_fx clap clap-wrapper-extensions)
+target_link_libraries(fastplugs_impl PUBLIC fastroute_fx fastplay_dsp clap clap-wrapper-extensions)
 target_compile_definitions(fastplugs_impl PRIVATE
     FASTPLUGS_VENDOR="${FASTPLUGS_VENDOR}"
     FASTPLUGS_ID_PREFIX="${FASTPLUGS_ID_PREFIX}"

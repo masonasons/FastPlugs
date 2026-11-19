@@ -1,18 +1,20 @@
 # FastPlugs
 
-FastRoute's built-in effects as CLAP, VST3 and Audio Unit plugins, for Windows
-and macOS.
+The built-in effects of FastRoute and FastPlay as CLAP, VST3 and Audio Unit
+plugins, for Windows and macOS.
 
-These are the same effects that run inside FastRoute. Nothing has been
-rewritten. The build takes FastRoute's own effect sources and compiles them
-unchanged. Fix something in FastRoute and the plugins get the fix the next
-time they are built.
+These are the same effects that run inside those two programs. Nothing has
+been rewritten. The build takes their own effect sources and compiles them
+unchanged. Fix something in FastRoute or FastPlay and the plugins get the fix
+the next time they are built.
 
 ## The plugins
 
-There is one bundle per format, and each bundle holds all thirteen plugins:
+There is one bundle per format, and each bundle holds all eighteen plugins:
 `FastPlugs.clap`, `FastPlugs.vst3` and, on the Mac, `FastPlugs.component`.
 Hosts list them separately under the vendor FastPlugs.
+
+### From FastRoute
 
 | Plugin | What it does | Parameters |
 |---|---|---|
@@ -30,12 +32,37 @@ Hosts list them separately under the vendor FastPlugs.
 | Clipping Monitor | Beeps when the signal reaches a threshold, without touching the audio | Threshold, Least time between beeps |
 | Buffer | Keeps the last minutes of audio, rewinds through them, saves them | Length, Skip, Rewind, Fast forward, Jump to live, Save to file |
 
-Every plugin also has **Bypass**, which hosts treat as their own bypass
-switch. All of them except the Clipping Monitor also have **Mix**, the
-dry/wet balance. Both fade over 20 ms rather than switching instantly.
+### From FastPlay
 
-The ranges, defaults and value text are FastRoute's. The ranges and defaults
-are read from FastRoute's own `model.h` at build time, so they cannot drift.
+| Plugin | What it does | Parameters |
+|---|---|---|
+| Echo | Stereo echo whose repeats bounce between left and right | Delay, Feedback, Mix |
+| Reverb | FastPlay's reverb, starting from one of 22 rooms | Room, Mix, Size, Damping, Width, Pre-delay, Low cut, High cut |
+| Advanced Reverb | FastPlay's EFX reverb, starting from one of 26 environments | Environment, Mix, Decay, High frequency decay, Density, Diffusion, Reflections level, Tail level, Reflections delay, Tail delay |
+| Center Cancel | Removes what is panned to the centre (usually the vocal), or keeps only that | Amount: up to +100% removes, down to -100% extracts |
+| 3D Audio | For headphones: virtual speakers around you (binaural or 5.1), or real speakers in one of 12 simulated rooms | Mode, Blend, Speaker spread, Rotation, Rear center speaker, Listener across/forward/up, Subwoofer, Crossover, Cone noise, Bass |
+
+FastPlay's other effects are not repeated here. Its normaliser is FastRoute's,
+and its compressor, three band EQ and stereo width are covered by the FastRoute
+plugins above. Its convolution reverb is left out because it needs an impulse
+response file, and a plugin parameter cannot name a file; it would need an
+editor window of its own.
+
+Choosing a **Room** or an **Environment** sets the reverb's other controls to
+that room's values, as it does in FastPlay, and the host is told, so its
+controls follow. Change any of them afterwards and the change stays. Choosing
+the same room again does not reset them.
+
+### What every plugin has
+
+Every plugin also has **Bypass**, which hosts treat as their own bypass
+switch. The FastRoute plugins, except the Clipping Monitor, also have **Mix**,
+the dry/wet balance. The FastPlay plugins already have a mix or blend of their
+own. Bypass and Mix fade over 20 ms rather than switching instantly.
+
+The ranges, defaults and value text are those of the program each effect comes
+from. They are read from FastRoute's `model.h` and from FastPlay's
+`effect_chain.cpp` at build time, so they cannot drift.
 
 FastRoute's plugin-host block is not included, because it is a host, not an
 effect.
@@ -76,6 +103,16 @@ Buffer's Length. Two automatable settings can still trigger a restart, and
 only if the plugin was started with them at zero: moving the Pitch Shifter off
 zero, and raising the Noise Gate's Range from zero, since the gate switches
 itself off, lookahead included, at zero range.
+
+Two of the FastPlay plugins always report the same latency, whatever they are
+set to. **Center Cancel** reports 4095 frames (85 ms at 48 kHz). That is what
+its spectral removal needs, and extracting or doing nothing is delayed to
+match, so moving the Amount through zero never restarts it. **3D Audio**
+reports 128 frames, one HRTF block, in every mode.
+
+The echo and reverbs tell the host how long they keep sounding after the
+input stops, worked out from their current settings, so a host rendering an
+export does not cut the tail off.
 
 ### The Buffer
 
@@ -131,8 +168,8 @@ load until you clear the quarantine:
 
 You need CMake 3.24 or later, plus Visual Studio 2022 on Windows or Xcode's
 command line tools on the Mac. Everything else is fetched on the first
-configure: FastRoute, RNNoise, SpeexDSP, Signalsmith Stretch, the CLAP
-headers, clap-wrapper, and the VST3 and AudioUnit SDKs.
+configure: FastRoute, FastPlay, RNNoise, SpeexDSP, Signalsmith Stretch, the
+CLAP headers, clap-wrapper, and the VST3 and AudioUnit SDKs.
 
     cmake -S . -B build
     cmake --build build --config Release
@@ -141,10 +178,10 @@ headers, clap-wrapper, and the VST3 and AudioUnit SDKs.
 The plugins end up in `build/out`. On the Mac, the build is universal (arm64
 and x86_64) and supports macOS 10.15 and later.
 
-By default the build fetches FastRoute at the commit pinned in
-`cmake/dependencies.cmake`. To build against a working copy instead:
+By default the build fetches FastRoute and FastPlay at the commits pinned in
+`cmake/dependencies.cmake`. To build against working copies instead:
 
-    cmake -S . -B build -DFASTROUTE_SOURCE_DIR=C:/git/FastRoute
+    cmake -S . -B build -DFASTROUTE_SOURCE_DIR=C:/git/FastRoute -DFASTPLAY_SOURCE_DIR=C:/stuff/fastplay
 
 ### How FastRoute's sources are compiled
 
@@ -159,15 +196,33 @@ own, used as it is.
 If FastRoute changes the `Effect` interface, this build stops compiling. Make
 the matching change in `src/shim/audio.h`.
 
-Two short functions from FastRoute's `model.cpp` are repeated in
-`src/shim/shim.cpp`: `EqBandHz` and `AutoMakeupDb`. They are the only logic
-here that is duplicated rather than shared.
+### How FastPlay's sources are compiled
+
+FastPlay's effect classes are already portable, so they are compiled where
+they stand, with no stand-ins: the two reverbs, the centre canceller, and the
+3D audio with its HRTF and the speakers engine. The Echo is FastPlay's
+`basic_effects.h`, which is header only.
+
+What FastPlay does around those classes lives in its `effect_chain.cpp`: the
+parameter ranges and defaults, the reverb rooms and environments, and the
+reverb mix law. That file belongs to FastPlay's player and cannot be compiled
+on its own. So at configure time CMake cuts that section out of it into a
+header, `fastplay_tables.inc` in the build tree, which is compiled as it is.
+If FastPlay rearranges that file, the configure step stops and says so.
+
+### What is repeated rather than shared
+
+Three short formulas: `EqBandHz` and `AutoMakeupDb` from FastRoute's
+`model.cpp`, in `src/shim/shim.cpp`, and the simple reverb's decay time, which
+FastPlay keeps private to `reverb.cpp` and which the Reverb plugin uses to
+report its tail. Everything else comes from FastRoute and FastPlay directly.
 
 ### Layout
 
     cmake/dependencies.cmake   everything fetched, and pinned
     src/shim/                  stand-ins for FastRoute's audio.h and util.h
-    src/plugin/effects.cpp     each effect's name, parameters and Block mapping
+    src/plugin/effects.cpp     each FastRoute effect's name, parameters and Block mapping
+    src/plugin/fastplay_fx.cpp the FastPlay effects, and what FastPlay does around them
     src/plugin/plugin.cpp      the CLAP plugin around any one effect
     src/plugin/factory.cpp     the bundle's factory, with AU and VST3 identities
     tests/smoke.cpp            a small host that exercises every plugin
@@ -183,6 +238,11 @@ here that is duplicated rather than shared.
   after a setting reduces it
 - needing more latency asks the host for a restart
 - saved state loads back exactly
+- a reverb room sets its controls, tells the host, and is not undone by the
+  host sending the same room back
+- Center Cancel and 3D Audio's processed sound arrives at the latency they
+  report, including after the 3D mode is changed while running
+- the echo and reverbs report a tail
 - unusual sample rates are refused or handled, never crash
 
 Set `FASTPLUGS_TEST_SAVE=1` to also have it press the Buffer's Save. That

@@ -32,6 +32,94 @@ if (NOT EXISTS ${FASTROUTE_SOURCE_DIR}/src/model.h)
 endif()
 message(STATUS "FastPlugs: effects from ${FASTROUTE_SOURCE_DIR}")
 
+# --- FastPlay --------------------------------------------------------------
+# Echo, the two reverbs, centre cancel and 3D audio come from here. Like
+# FastRoute: point FASTPLAY_SOURCE_DIR at a working copy, or leave it empty
+# for the pinned commit.
+set(FASTPLAY_SOURCE_DIR "" CACHE PATH "A FastPlay checkout to take the effects from")
+set(FASTPLAY_GIT_TAG c8a02902aae3bbaece66cef1f8c08a8bf5a6e2c8 CACHE STRING
+    "FastPlay commit to fetch when FASTPLAY_SOURCE_DIR is empty")
+
+if (FASTPLAY_SOURCE_DIR STREQUAL "")
+    FetchContent_Declare(fastplay
+        GIT_REPOSITORY https://github.com/masonasons/FastPlay.git
+        GIT_TAG        ${FASTPLAY_GIT_TAG}
+        SOURCE_SUBDIR  do-not-build)
+    FetchContent_MakeAvailable(fastplay)
+    set(FASTPLAY_SOURCE_DIR ${fastplay_SOURCE_DIR})
+endif()
+if (NOT EXISTS ${FASTPLAY_SOURCE_DIR}/src/effect_chain.cpp)
+    message(FATAL_ERROR "No FastPlay source at ${FASTPLAY_SOURCE_DIR}")
+endif()
+message(STATUS "FastPlugs: FastPlay effects from ${FASTPLAY_SOURCE_DIR}")
+
+# FastPlay's parameter ranges and defaults, its reverb rooms and environments,
+# and the reverb mix law all live at the top of effect_chain.cpp, which as a
+# whole belongs to FastPlay's player and cannot be compiled here. So that part
+# of it - from clamp_val to the end of the file's private namespace - is cut
+# out into a header at configure time, and compiled as it is. If FastPlay
+# moves things about, this stops with a message rather than going stale.
+file(READ ${FASTPLAY_SOURCE_DIR}/src/effect_chain.cpp _fp_chain)
+string(FIND "${_fp_chain}" "template <typename T> T clamp_val" _fp_begin)
+# The end is the private namespace's closing brace, just before the public
+# "namespace audio {". Found from that line backwards, so it does not matter
+# whether the checkout has LF or CRLF line endings.
+string(FIND "${_fp_chain}" "namespace audio {" _fp_public)
+set(_fp_end -1)
+if (NOT _fp_public EQUAL -1)
+    string(SUBSTRING "${_fp_chain}" 0 ${_fp_public} _fp_head)
+    string(FIND "${_fp_head}" "}  // namespace" _fp_end REVERSE)
+endif()
+if (_fp_begin EQUAL -1 OR _fp_end EQUAL -1 OR _fp_end LESS _fp_begin)
+    message(FATAL_ERROR "FastPlugs: FastPlay's effect_chain.cpp is no longer laid out "
+        "as cmake/dependencies.cmake expects; update the markers there.")
+endif()
+math(EXPR _fp_len "${_fp_end} - ${_fp_begin}")
+string(SUBSTRING "${_fp_chain}" ${_fp_begin} ${_fp_len} _fp_tables)
+set(FASTPLAY_TABLES_DIR ${CMAKE_CURRENT_BINARY_DIR}/fastplay_tables)
+file(WRITE ${FASTPLAY_TABLES_DIR}/fastplay_tables.inc.tmp
+"// Generated from FastPlay's src/effect_chain.cpp at configure time. Do not edit.\n${_fp_tables}")
+configure_file(${FASTPLAY_TABLES_DIR}/fastplay_tables.inc.tmp
+               ${FASTPLAY_TABLES_DIR}/fastplay_tables.inc COPYONLY)
+# Reconfigure when effect_chain.cpp changes.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             ${FASTPLAY_SOURCE_DIR}/src/effect_chain.cpp)
+
+add_library(fastplay_dsp STATIC
+    ${FASTPLAY_SOURCE_DIR}/src/reverb/reverb.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/reverb/efx_reverb.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/center_cancel.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/spatial_audio.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/spatial/hrtf.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/spatial/hrtf_data.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/spatial/pffft/pffft.c
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/presets.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/core/dsp.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/model/room.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/model/speaker.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/model/system.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/engine/engine.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/engine/modes.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/engine/reverb.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/engine/spatial.cpp
+    ${FASTPLAY_SOURCE_DIR}/src/speakers/engine/voice.cpp)
+# As FastPlay's engine library has them: its own headers, its sources, and
+# basic_effects.h, which is header only.
+target_include_directories(fastplay_dsp PUBLIC
+    ${FASTPLAY_SOURCE_DIR}/include/fastplay
+    ${FASTPLAY_SOURCE_DIR}/src
+    ${FASTPLAY_TABLES_DIR})
+target_compile_definitions(fastplay_dsp PRIVATE _CRT_SECURE_NO_WARNINGS)
+if (MSVC)
+    target_compile_definitions(fastplay_dsp PUBLIC NOMINMAX)
+    target_compile_options(fastplay_dsp PRIVATE /utf-8 /W3)
+    set_source_files_properties(${FASTPLAY_SOURCE_DIR}/src/spatial/pffft/pffft.c
+        PROPERTIES COMPILE_OPTIONS /w)
+else()
+    set_source_files_properties(${FASTPLAY_SOURCE_DIR}/src/spatial/pffft/pffft.c
+        PROPERTIES COMPILE_OPTIONS -w)
+endif()
+
 # --- RNNoise ---------------------------------------------------------------
 # The same pin as FastRoute, for the same reason: v0.1.1 is the last release
 # that commits its trained weights, so the build never downloads a model.
