@@ -94,11 +94,16 @@ jobs:
             gh release download "$PLUGINVAL_TAG" --repo Tracktion/pluginval -p pluginval_macOS.zip
           fi
           for z in *.zip; do unzip -o -q "$z"; done
+          # The Mac clap-validator zip holds a tarball rather than the binary.
+          shopt -s nullglob
+          for t in *.tar.gz; do tar xzf "$t"; done
           ls -la
 
       - name: clap-validator
         run: |
-          V=$(find tools -name 'clap-validator' -o -name 'clap-validator.exe' | head -1)
+          V=$(find tools -type f \( -name 'clap-validator' -o -name 'clap-validator.exe' \) | head -1)
+          if [ -z "$V" ]; then echo "clap-validator not found"; exit 1; fi
+          chmod +x "$V"
           CLAP=dist/FastPlugs/FastPlugs.clap
           # Everything but the sample rate sweep, for every plugin.
           "$V" validate --only-failed --hide-output -x process-varying-sample-rates "$CLAP"
