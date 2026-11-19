@@ -66,21 +66,26 @@ ParamDef Trigger(clap_id id, const char* name, int action)
     return p;
 }
 
-// FastRoute's own wording, from model.cpp, so a setting reads the same in a
-// host as it does in a FastRoute block.
-const std::vector<std::string> kParaShapes = {
-    "Off", "Peaking", "Low shelf", "High shelf", "Low pass", "High pass" };
-const std::vector<std::string> kPitchQualities = {
-    "Best, about 120 ms of delay",
-    "Balanced, about 60 ms of delay",
-    "Low delay, about 30 ms" };
-
 // The Speex suppression slider's range. FastRoute keeps it in the dialog
 // rather than in model.h, so it is repeated here.
 const int kSuppressMin = 3, kSuppressMax = 45;
 
 std::vector<EffectDef> Build()
 {
+    // FastRoute's own wording, from model.cpp, so a setting reads the same in
+    // a host as it does in a FastRoute block.
+    //
+    // Local, not file scope: the Audio Unit wrapper calls the entry's init -
+    // and so this - while the binary's static constructors are still running,
+    // and a file scope vector here may not have been built yet. It was not,
+    // on the Mac: every choice came out with no choices at all.
+    const std::vector<std::string> kParaShapes = {
+        "Off", "Peaking", "Low shelf", "High shelf", "Low pass", "High pass" };
+    const std::vector<std::string> kPitchQualities = {
+        "Best, about 120 ms of delay",
+        "Balanced, about 60 ms of delay",
+        "Low delay, about 30 ms" };
+
     const Block d;   // FastRoute's defaults
     std::vector<EffectDef> all;
 

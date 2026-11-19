@@ -106,7 +106,6 @@ public:
     Plugin(const clap_host_t* host, const EffectDef& def)
         : m_host(host), m_def(def), m_count(def.params.size()),
           m_values(new std::atomic<double>[def.params.size()]),
-          m_hostTrig(def.params.size(), 0.0),
           m_snap(def.params.size(), 0.0)
     {
         for (size_t i = 0; i < m_count; ++i) m_values[i].store(def.params[i].def);
@@ -148,10 +147,10 @@ private:
         m_hostLog     = static_cast<const clap_host_log_t*>(m_host->get_extension(m_host, CLAP_EXT_LOG));
 
         // clap-wrapper's Audio Units turn a stepped parameter of more than two
-        // values into an Indexed one, and an Indexed parameter has to hand
-        // auval and the host a list of its names - which the wrapper does not
-        // provide, so auval fails it outright. Under an Audio Unit a choice is
-        // therefore an ordinary parameter whose values still read as names.
+        // values into an Indexed one, and an Indexed parameter is expected to
+        // come with the list of its names - which the wrapper does not
+        // provide. Under an Audio Unit a choice is therefore an ordinary
+        // parameter, whose values still read as names one at a time.
         const auto* wrapper = static_cast<const clap_wrapper_host_information_t*>(
             m_host->get_extension(m_host, CLAP_WRAPPER_HOST_INFORMATION));
         if (wrapper && wrapper->get_wrapper_flavor)
@@ -264,7 +263,7 @@ private:
         }
     }
 
-    void ApplyParam(const clap_event_param_value_t* ev, const clap_output_events_t* out)
+    void ApplyParam(const clap_event_param_value_t* ev)
     {
         const int idx = ParamIndex(m_def, ev->param_id);
         if (idx < 0) return;
@@ -273,19 +272,13 @@ private:
 
         if (d.unit == Unit::Trigger)
         {
-            // A button. Hosts draw it as a switch, and some put a switch back
-            // when told to and some do not, so every change presses it - and
-            // so does arriving at On, which is a press whichever way the host
-            // drew the last one.
-            const bool press = v >= 0.5 || v != m_hostTrig[(size_t)idx];
-            m_hostTrig[(size_t)idx] = v;
-            if (press && m_fx) m_fx->DoAction(d.action);
-            m_values[idx].store(0.0);
-            if (v >= 0.5)
-            {
-                m_hostTrig[(size_t)idx] = 0.0;
-                if (out) PushValue(out, ev->header.time, d.id, 0.0);
-            }
+            // A button, which no plugin format has. Hosts draw it as a
+            // switch, so every change of the switch is a press, either way.
+            // The value is kept as set rather than put back to Off: an Audio
+            // Unit's parameters must hold what they were given, and a switch
+            // that flips back by itself is one a host may or may not redraw.
+            const double old = m_values[idx].exchange(v);
+            if (v != old && m_fx) m_fx->DoAction(d.action);
             return;
         }
 
@@ -294,32 +287,14 @@ private:
         m_dirty = true;
     }
 
-    static void PushValue(const clap_output_events_t* out, uint32_t time, clap_id id, double v)
-    {
-        clap_event_param_value_t e{};
-        e.header.size = sizeof(e);
-        e.header.time = time;
-        e.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-        e.header.type = CLAP_EVENT_PARAM_VALUE;
-        e.header.flags = 0;
-        e.param_id = id;
-        e.cookie = nullptr;
-        e.note_id = -1;
-        e.port_index = -1;
-        e.channel = -1;
-        e.key = -1;
-        e.value = v;
-        out->try_push(out, &e.header);
-    }
-
-    void Flush(const clap_input_events_t* in, const clap_output_events_t* out)
+    void Flush(const clap_input_events_t* in)
     {
         const uint32_t n = in ? in->size(in) : 0;
         for (uint32_t i = 0; i < n; ++i)
         {
             const clap_event_header_t* h = in->get(in, i);
             if (h->space_id == CLAP_CORE_EVENT_SPACE_ID && h->type == CLAP_EVENT_PARAM_VALUE)
-                ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h), out);
+                ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h));
         }
         if (m_fx && m_dirty.exchange(false)) ConfigureNow();
     }
@@ -342,7 +317,7 @@ private:
                 continue;
             const uint32_t t = std::min(h->time, frames);
             if (t > pos) { Render(p, pos, t); pos = t; }
-            ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h), p->out_events);
+            ApplyParam(reinterpret_cast<const clap_event_param_value_t*>(h));
         }
         if (pos < frames) Render(p, pos, frames);
         return CLAP_PROCESS_CONTINUE;
@@ -439,7 +414,6 @@ private:
         for (size_t i = 0; i < m_count; ++i)
         {
             const ParamDef& d = m_def.params[i];
-            if (d.unit == Unit::Trigger) continue;
             char line[64];
             std::snprintf(line, sizeof(line), "%u %lld\n", (unsigned)d.id,
                           (long long)std::llround(m_values[i].load() * 1e6));
@@ -492,7 +466,6 @@ private:
             const int idx = ParamIndex(m_def, (clap_id)id);
             if (idx < 0) continue;
             const ParamDef& d = m_def.params[(size_t)idx];
-            if (d.unit == Unit::Trigger) continue;
             m_values[idx].store(std::max(d.min, std::min(d.max, (double)raw / 1e6)));
         }
 
@@ -597,7 +570,6 @@ private:
 
     const size_t m_count;
     std::unique_ptr<std::atomic<double>[]> m_values;   // read anywhere
-    std::vector<double> m_hostTrig;    // what the host last sent each trigger
     std::vector<double> m_snap;        // a consistent copy, for toBlock
     int m_mixIndex = -1, m_bypassIndex = -1;
     std::atomic<bool> m_dirty{ true };
@@ -642,8 +614,8 @@ const clap_plugin_params_t Plugin::s_params = {
         if (idx < 0 || !text) return false;
         return TextValue(Self(p)->m_def.params[(size_t)idx], text, v);
     },
-    [](const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t* out)
-        { Self(p)->Flush(in, out); },
+    [](const clap_plugin_t* p, const clap_input_events_t* in, const clap_output_events_t*)
+        { Self(p)->Flush(in); },
 };
 
 const clap_plugin_state_t Plugin::s_state = {

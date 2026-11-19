@@ -263,10 +263,6 @@ std::vector<clap_param_info_t> Params(Instance& in)
     return out;
 }
 
-bool IsTrigger(const clap_param_info_t& info)
-{
-    return std::strcmp(info.module, "Actions") == 0;
-}
 
 // --- the checks -------------------------------------------------------------------
 
@@ -274,6 +270,22 @@ void CheckText(Instance& in)
 {
     for (const auto& info : Params(in))
     {
+        // A choice built before its list of choices existed - which is what
+        // static initialisation order did under the Audio Unit wrapper - has
+        // a range that ends below where it starts.
+        CHECK(info.max_value > info.min_value, "%s: range %g to %g",
+              info.name, info.min_value, info.max_value);
+        // An Audio Unit's parameters must keep what they are set to, the
+        // Buffer's buttons included.
+        const double probe = info.min_value + 0.37 * (info.max_value - info.min_value);
+        if (!(info.flags & CLAP_PARAM_IS_BYPASS) && std::strcmp(info.name, "Save to file") != 0)
+        {
+            in.Set(info.id, probe);
+            CHECK(std::fabs(in.Get(info.id) - probe) < 1e-9, "%s: set to %g, holds %g",
+                  info.name, probe, in.Get(info.id));
+            in.Set(info.id, info.default_value);
+        }
+
         // Three points along each range, not only the default, so a unit's
         // formatting is exercised where it says something different.
         const double pts[3] = { info.min_value, info.default_value, info.max_value };
@@ -394,7 +406,6 @@ void CheckState(const clap_plugin_factory_t* f, const char* id)
     const auto params = Params(a);
     for (const auto& info : params)
     {
-        if (IsTrigger(info)) continue;
         double v = info.min_value + Rand01() * (info.max_value - info.min_value);
         if (info.flags & CLAP_PARAM_IS_STEPPED) v = std::round(v);
         a.Set(info.id, v);
@@ -406,7 +417,6 @@ void CheckState(const clap_plugin_factory_t* f, const char* id)
     CHECK(b.state->load(b.p, &s.in), "%s: load failed", id);
     for (const auto& info : params)
     {
-        if (IsTrigger(info)) continue;
         const double va = a.Get(info.id), vb = b.Get(info.id);
         CHECK(std::fabs(va - vb) < 1e-5, "%s: %s saved as %g, loaded as %g",
               id, info.name, va, vb);

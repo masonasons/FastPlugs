@@ -80,8 +80,9 @@ itself off, lookahead included, at zero range.
 ### The Buffer
 
 **Rewind**, **Fast forward**, **Jump to live** and **Save to file** are
-buttons. Hosts draw them as switches. Any change to one presses it, and the
-plugin sets it back to Off afterwards for hosts that support that.
+buttons, but no plugin format has buttons, so hosts draw them as switches.
+Every time you flip one, in either direction, it presses that button. The
+switch stays where you put it; whether it shows On or Off means nothing.
 
 **Save to file** writes 24-bit WAV to `Documents/FastPlugs`. A host has no way
 to offer a folder picker for a parameter, so that location is fixed. FastRoute
