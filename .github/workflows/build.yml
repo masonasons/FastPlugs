@@ -1,0 +1,151 @@
+name: Build
+
+# Every push builds both platforms, runs the smoke test, and runs each format
+# through the validator that format is judged by: clap-validator for the CLAP,
+# pluginval for the VST3, and Apple's own auval for the Audio Units.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLAP_VALIDATOR_TAG: "0.4.1"
+  PLUGINVAL_TAG: "v1.0.4"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: macos
+
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Everything is fetched on the first configure: FastRoute itself at the
+      # pinned commit, its denoisers and pitch shifter, the CLAP headers,
+      # clap-wrapper, and the VST3 and AudioUnit SDKs.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/_deps
+            build/cpm
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/dependencies.cmake') }}
+
+      - name: Configure
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S . -B build -A x64
+          else
+            # Universal: CMakeLists.txt asks for arm64 and x86_64 by default.
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Smoke test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Collect the plugins
+        run: |
+          mkdir -p dist/FastPlugs
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp build/out/CLAP/Release/FastPlugs.clap dist/FastPlugs/
+            cp -R build/out/VST3/FastPlugs.vst3 dist/FastPlugs/
+          else
+            for b in FastPlugs.clap FastPlugs.vst3 FastPlugs.component; do
+              cp -R "build/out/$b" dist/FastPlugs/
+              # Ad hoc: enough for Apple Silicon to load it on the machine
+              # it is built on or unquarantined on. Distribution to anybody
+              # else wants a Developer ID signature and notarisation.
+              codesign --force --deep --sign - "dist/FastPlugs/$b"
+            done
+            lipo -info dist/FastPlugs/FastPlugs.component/Contents/MacOS/FastPlugs
+          fi
+          cp README.md LICENSE dist/FastPlugs/
+
+      - name: Fetch the validators
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p tools && cd tools
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            gh release download "$CLAP_VALIDATOR_TAG" --repo free-audio/clap-validator -p "*windows.zip"
+            gh release download "$PLUGINVAL_TAG" --repo Tracktion/pluginval -p pluginval_Windows.zip
+          else
+            gh release download "$CLAP_VALIDATOR_TAG" --repo free-audio/clap-validator -p "*macos-universal.zip"
+            gh release download "$PLUGINVAL_TAG" --repo Tracktion/pluginval -p pluginval_macOS.zip
+          fi
+          for z in *.zip; do unzip -o -q "$z"; done
+          ls -la
+
+      - name: clap-validator
+        run: |
+          V=$(find tools -name 'clap-validator' -o -name 'clap-validator.exe' | head -1)
+          CLAP=dist/FastPlugs/FastPlugs.clap
+          # Everything but the sample rate sweep, for every plugin.
+          "$V" validate --only-failed --hide-output -x process-varying-sample-rates "$CLAP"
+          # The sweep goes down to 1 kHz and through fractional rates. Speex
+          # Denoise refuses the rates its FFT cannot factor rather than let
+          # SpeexDSP call exit() inside the host, and the validator counts a
+          # refusal as a failure - so the sweep runs for the other twelve.
+          for id in rnnoise tone eq10 para-eq channels compressor limiter gate normaliser pitch clip-monitor buffer; do
+            "$V" validate --only-failed --hide-output -t process-varying-sample-rates \
+              -p "io.github.masonasons.fastplugs.$id" "$CLAP"
+          done
+
+      - name: pluginval (VST3)
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            P=tools/pluginval.exe
+          else
+            P=tools/pluginval.app/Contents/MacOS/pluginval
+          fi
+          "$P" --strictness-level 8 --skip-gui-tests --validate dist/FastPlugs/FastPlugs.vst3
+
+      - name: auval
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R dist/FastPlugs/FastPlugs.component ~/Library/Audio/Plug-Ins/Components/
+          # The registrar caches what it saw before the copy.
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -a | grep FPlg
+          for st in Spdn RNns Tone Eq10 PEq4 ChMx Comp Limt Gate Norm Ptch Clip Bufr; do
+            echo "=== $st"
+            auval -v aufx "$st" FPlg
+          done
+
+      # Zipped here rather than by upload-artifact, which drops Unix
+      # permissions - and a Mac bundle without its executable bit is a bundle
+      # that will not load.
+      - name: Package
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            (cd dist && 7z a -tzip "../FastPlugs-${{ matrix.name }}.zip" FastPlugs > /dev/null)
+          else
+            ditto -c -k --keepParent dist/FastPlugs "FastPlugs-${{ matrix.name }}.zip"
+          fi
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: FastPlugs-${{ matrix.name }}
+          path: FastPlugs-${{ matrix.name }}.zip

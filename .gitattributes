@@ -1,0 +1,2 @@
+# Git stores LF whatever an editor wrote; each checkout decides what it gets.
+* text=auto
