@@ -151,6 +151,10 @@ take the host down with it.
 
 ## Installing
 
+The newest build is always at
+[the "latest" release](https://github.com/masonasons/FastPlugs/releases/tag/latest):
+every push to main that passes the validators replaces it.
+
 Windows:
 
 - `FastPlugs.clap` goes in `C:\Program Files\Common Files\CLAP`

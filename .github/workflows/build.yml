@@ -13,6 +13,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+# For the release job, which replaces the "latest" release.
+permissions:
+  contents: write
+
 env:
   CLAP_VALIDATOR_TAG: "0.4.1"
   PLUGINVAL_TAG: "v1.0.4"
@@ -160,3 +164,58 @@ jobs:
         with:
           name: FastPlugs-${{ matrix.name }}
           path: FastPlugs-${{ matrix.name }}.zip
+
+  # Every push to main that passes everything above replaces the "latest"
+  # release with what it built: one release, always the newest build, as
+  # FastRoute does. Pull requests build and validate but publish nothing.
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download the builds
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List what will be released
+        run: ls -la artifacts/
+
+      # Replaced rather than added to, so "latest" is always exactly one build.
+      - name: Remove the previous latest
+        run: gh release delete latest --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
+      - name: Publish latest
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            Automated build from commit ${{ github.sha }}, replaced on every push to main.
+
+            ${{ github.event.head_commit.message }}
+
+            ## Download
+
+            - **FastPlugs-windows.zip**: `FastPlugs.clap` and `FastPlugs.vst3` for 64 bit Windows.
+            - **FastPlugs-macos.zip**: `FastPlugs.clap`, `FastPlugs.vst3` and `FastPlugs.component`, universal (Apple Silicon and Intel), macOS 10.15 or later.
+
+            Each holds all eighteen plugins. Where to put them is in the README.
+
+            The Mac build is signed ad hoc and not notarised. After installing, clear the quarantine:
+
+                xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/FastPlugs.component
+
+            and the same for the `.clap` and the `.vst3`.
+
+            Every plugin in this build passed clap-validator, pluginval and, on the Mac, auval.
+          files: artifacts/*.zip
+          prerelease: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
